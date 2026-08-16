@@ -4,6 +4,14 @@
 
 - 要件や処理方式の例を用いて、バックアップを整理する。
 
+## 社内システムの一日の処理の流れの例
+
+- 08:00 オンライン処理開始(APサーバを起動する等、社員が業務システムを利用可能な状態になる)
+- 08:00〜22:00 オンライン処理(通常業務時間)
+- 22:00 オンライン処理終了(APサーバを停止する等、システムへのアクセスを遮断する)
+- 22:00〜23:00 バックアップ処理
+- 23:00〜翌08:00 システムメンテナンス可能時間（この時間を利用して、不定期の各種メンテナンスを実施する）
+
 ## 要件一覧:ログ保管期間
 
 | No | ログ種別 | オンライン保管期間(即時参照可能) | 長期保管期間(アーカイブ) | 保管媒体(長期) | BCP(遠隔地保管) | 保管期間の根拠(仮) |
@@ -122,5 +130,59 @@ Caused by : oracle.jdbc.OracleDatabaseException: ORA-00060 at line 1
 ```
 
 
+## バックアップに使用するコマンド
+
+| 操作 | Linux | Windows(コマンドプロンプト) | Windows(PowerShell) |
+|---|---|---|---|
+| コピー | `cp -p source.log /backup/` | `copy source.log C:\backup\` | `Copy-Item source.log C:\backup\` |
+| コピー(再帰) | `cp -rp /logs/ /backup/logs/` | `xcopy /E /H /I logs C:\backup\logs` | `Copy-Item -Recurse logs C:\backup\logs` |
+| 移動 | `mv source.log /backup/` | `move source.log C:\backup\` | `Move-Item source.log C:\backup\` |
+| 削除 | `rm old.log` | `del old.log` | `Remove-Item old.log` |
+| 削除(再帰) | `rm -rf /backup/old/` | `rmdir /S /Q C:\backup\old` | `Remove-Item -Recurse -Force C:\backup\old` |
+| フォルダ作成 | `mkdir -p /backup/2026/08` | `mkdir C:\backup\2026\08` | `New-Item -ItemType Directory -Force C:\backup\2026\08` |
+| フォルダ削除 | `rmdir /backup/empty` | `rmdir C:\backup\empty` | `Remove-Item C:\backup\empty` |
+| 圧縮 | `tar czf logs_20260812.tar.gz logs/` | `powershell Compress-Archive -Path logs -DestinationPath logs_20260812.zip` | `Compress-Archive -Path logs -DestinationPath logs_20260812.zip` |
+| 展開(解凍) | `tar xzf logs_20260812.tar.gz` | `powershell Expand-Archive -Path logs_20260812.zip -DestinationPath logs` | `Expand-Archive -Path logs_20260812.zip -DestinationPath logs` |
+| 一定期間より古いファイル削除 | `find /backup -mtime +30 -name "*.log" -delete` | `forfiles /P C:\backup /M *.log /D -30 /C "cmd /c del @path"` | `Get-ChildItem C:\backup -Filter *.log \| Where-Object {$_.LastWriteTime -lt (Get-Date).AddDays(-30)} \| Remove-Item` |
+| 差分同期(ミラーリング) | `rsync -av --delete /logs/ /backup/logs/` | `robocopy C:\logs C:\backup\logs /MIR` | `robocopy C:\logs C:\backup\logs /MIR` |
 
 
+## バックアップ処理の流れ
+
+- 静止点を確保する
+- バックアップ先にフォルダを作成する
+- コピー元を圧縮し、バックアップ先にコピーする
+- コピー先の保管期間を超過したものを削除する
+- コピー元を削除する
+- 静止点の確保を終了する
+
+
+## バックアップ処理の実装例
+
+アクセスログ(Webサーバ)を対象とした、夜間日次バックアップのシェルスクリプト例です。
+「要件一覧:ログ保管期間」のNo.1に従い、ローカル(オンライン)は30日、NAS(長期保管/アーカイブ)は1年を保管期間としています。
+
+```bash
+#!/bin/bash
+set -e  # コマンドが失敗したらスクリプトを即座に終了する
+
+SRC_DIR="/var/log/app/access"     # コピー元(アクセスログの出力先、オンライン保管:30日)
+NAS_DIR="/mnt/nas/backup/access"  # NAS上のバックアップ先(長期保管:1年)
+ONLINE_RETENTION_DAYS=30          # ローカル(オンライン)保管期間
+NAS_RETENTION_DAYS=365            # NAS(長期保管)保管期間
+DATE=$(date +%Y%m%d)              # バックアップファイル名に使う日付(例:20260812)
+
+# NAS側にバックアップ先フォルダを作成する
+mkdir -p "${NAS_DIR}"
+
+# 当日分のログを圧縮し、NASへコピーする(長期保管用)
+tar czf "${NAS_DIR}/access_${DATE}.tar.gz" -C "${SRC_DIR}" .
+
+# NAS側:長期保管期間(1年)を超過したバックアップを削除する
+find "${NAS_DIR}" -name "*.tar.gz" -mtime +${NAS_RETENTION_DAYS} -delete
+
+# ローカル側:オンライン保管期間(30日)を超過したログのみ削除する(30日以内は即時参照可能な状態を維持)
+find "${SRC_DIR}" -name "access_*.log" -mtime +${ONLINE_RETENTION_DAYS} -delete
+```
+
+- 静止点の確保(アプリケーションサーバ停止）、静止点の確保の終了（アプリケーションサーバ起動)は上記の前後で実施する。
